@@ -368,8 +368,17 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
             **tool_kwargs,
         )
         
-        response = await self.reflect_and_improve(model,response,max_tokens,top_p,temperature,user_input.conversation_id, **tool_kwargs,)
-
+        # Call to the reflection and improvement function
+        # Process the initial API response
+        response = await self.reflect_and_improve(
+            model=model,
+            original_response=response,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            temperature=temperature,
+            user_input=user_input,
+            tool_kwargs=tool_kwargs
+        )
         _LOGGER.info("Response %s", response.model_dump(exclude_none=True))
 
         if response.usage.total_tokens > context_threshold:
@@ -391,29 +400,32 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
 
         return OpenAIQueryResponse(response=response, message=message)
 
-   async def reflect_and_improve(self, model, original_response, max_tokens, top_p, temperature, user_input, tool_kwargs):
-    """Reflect on and potentially improve the response."""
-    # Extract the user's original input and AI's initial response from the completion
-    original_messages = original_response.choices[0].message.content
-    user_message = {"role": "user", "content": user_input.text}
-    system_message = {"role": "system", "content": original_messages}
+  async def reflect_and_improve(self, model, original_response, max_tokens, top_p, temperature, user_input, tool_kwargs):
+    try:
+        # Extract the initial AI response content
+        original_content = original_response.choices[0].message.content
 
-    # Create a new prompt for reflection
-    reflection_prompt = f"This was the user's input: '{user_message['content']}' and this was the AI's response: '{system_message['content']}'. Please check if the answer meets the requirements and improve it. It should be short, informative, and easy to listen to."
-    messages = [user_message, system_message, {"role": "system", "content": reflection_prompt}]
+        # Create the new reflection message
+        reflection_prompt = f"This was the user's input: '{user_input.text}' and this was the AI's initial response: '{original_content}'. Please improve it."
+        messages = [
+            {"role": "user", "content": user_input.text},
+            {"role": "system", "content": reflection_prompt}
+        ]
 
-    # Call the OpenAI API again with the new prompt for improved response
-    refined_response = await self.client.chat.completions.create(
-        model=model,
-        messages=messages,
-        max_tokens=max_tokens,
-        top_p=top_p,
-        temperature=temperature,
-        user=user_input.context.user_id,  # Ensure the user context is maintained
-        **tool_kwargs
-    )
+        refined_response = await self.client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            temperature=temperature,
+            user=user_input.context.user_id,
+            **tool_kwargs
+        )
+        return refined_response
+    except Exception as e:
+        _LOGGER.error("Failed during reflection and improvement: %s", e)
+        raise
 
-    return refined_response
 
     
     async def execute_function_call(
