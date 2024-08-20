@@ -133,6 +133,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 class OpenAIAgent(conversation.AbstractConversationAgent):
     """OpenAI conversation agent."""
     STATIC_CONVERSATION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
+    RELFEKTION_ITERATION_NUMBER = 3
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize the agent."""
@@ -197,12 +198,19 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
 
         try:
             query_response = await self.query(user_input, messages, exposed_entities, 0)
+            user_text=user_input.text
+            response_text=query_response.message.content
 
-            # Reflexion und Verbesserung der Antwort
-            improved_response = await self.reflect_and_improve_response(
-                user_input.text, query_response.message.content
-            )
+            for i in range (self.RELFEKTION_ITERATION_NUMBER):
+                # Reflexion und Verbesserung der Antwort
+                improved_response = await self.reflect_and_improve_response(
+                    user_text, response_text
+                )
+                response_text=improved_response
+
             query_response.message.content = improved_response
+
+
         except OpenAIError as err:
             _LOGGER.error(err)
             intent_response = intent.IntentResponse(language=user_input.language)
@@ -407,9 +415,9 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
 
     async def reflect_and_improve_response(self, user_query: str, gpt_response: str) -> str:
         """Reflektiere und verbessere die Antwort basierend auf der ursprünglichen Anfrage."""
-        reflection_prompt = f"Benutzeranfrage: {user_query}\nGPT-Antwort: {gpt_response}\n---\nÜberprüfe und verbessere die Antwort, basierend auf der Anfrage."
+        reflection_prompt = f"Benutzeranfrage: {user_query}\nGPT-Antwort: {gpt_response}\n---\nHier ist deine Aufgabe: Überprüfe ob die Antwort den Anforderungen der Benutzeranfrage entspricht. Lasse bei Anweisungen keine Rückfragen zu. Deine Verbesserte Antwort wird mit der vorherigen Antwort ersetzt. Also check, if the response is valid for the given exposed entity values"
         response = await self.client.chat.completions.create(
-            model="gpt-3.5-turbo-1106",  # Annahme, dass dies das gewünschte Modell ist
+            model="gpt-4o",  # Annahme, dass dies das gewünschte Modell ist
             messages=[
                 {"role": "system", "content": reflection_prompt}
             ],
