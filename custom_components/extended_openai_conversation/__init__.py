@@ -1,4 +1,4 @@
-"""The OpenAI Conversation integration."""
+"""The OpenAI Conversation integration. Test"""
 from __future__ import annotations
 
 import json
@@ -132,6 +132,7 @@ async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 class OpenAIAgent(conversation.AbstractConversationAgent):
     """OpenAI conversation agent."""
+    STATIC_CONVERSATION_ID = "01ARZ3NDEKTSV4RRFFQ69G5FAV"
 
     def __init__(self, hass: HomeAssistant, entry: ConfigEntry) -> None:
         """Initialize the agent."""
@@ -159,16 +160,17 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
         return MATCH_ALL
 
     async def async_process(
-        self, user_input: conversation.ConversationInput
+            self, user_input: conversation.ConversationInput
     ) -> conversation.ConversationResult:
+        # Verwende immer die statische Conversation ID
+        conversation_id = self.STATIC_CONVERSATION_ID
+        user_input.conversation_id = conversation_id
+
         exposed_entities = self.get_exposed_entities()
 
-        if user_input.conversation_id in self.history:
-            conversation_id = user_input.conversation_id
+        if conversation_id in self.history:
             messages = self.history[conversation_id]
         else:
-            conversation_id = ulid.ulid()
-            user_input.conversation_id = conversation_id
             try:
                 system_message = self._generate_system_message(
                     exposed_entities, user_input
@@ -184,6 +186,7 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
                     response=intent_response, conversation_id=conversation_id
                 )
             messages = [system_message]
+
         user_message = {"role": "user", "content": user_input.text}
         if self.entry.options.get(CONF_ATTACH_USERNAME, DEFAULT_ATTACH_USERNAME):
             user = await self.hass.auth.async_get_user(user_input.context.user_id)
@@ -194,6 +197,12 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
 
         try:
             query_response = await self.query(user_input, messages, exposed_entities, 0)
+
+            # Reflexion und Verbesserung der Antwort
+            improved_response = await self.reflect_and_improve_response(
+                user_input.text, query_response.message.content
+            )
+            query_response.message.content = improved_response
         except OpenAIError as err:
             _LOGGER.error(err)
             intent_response = intent.IntentResponse(language=user_input.language)
@@ -367,18 +376,7 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
             user=user_input.conversation_id,
             **tool_kwargs,
         )
-        
-        # Call to the reflection and improvement function
-        # Process the initial API response
-        response = await self.reflect_and_improve(
-            model=model,
-            original_response=response,
-            max_tokens=max_tokens,
-            top_p=top_p,
-            temperature=temperature,
-            user_input=user_input,
-            tool_kwargs=tool_kwargs
-        )
+
         _LOGGER.info("Response %s", response.model_dump(exclude_none=True))
 
         if response.usage.total_tokens > context_threshold:
@@ -386,7 +384,14 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
 
         choice: Choice = response.choices[0]
         message = choice.message
+     
+        # Check if message.content is None and handle it appropriately
+        if message.content is None:
+            new_text = "Hey Master, " + "default message"  # Use a default message or handle the situation as needed
+        else:
+            new_text = "Hey Master, " + message.content
 
+        message.content = new_text
         if choice.finish_reason == "function_call":
             return await self.execute_function_call(
                 user_input, messages, message, exposed_entities, n_requests + 1
@@ -400,34 +405,21 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
 
         return OpenAIQueryResponse(response=response, message=message)
 
-  async def reflect_and_improve(self, model, original_response, max_tokens, top_p, temperature, user_input, tool_kwargs):
-    try:
-        # Extract the initial AI response content
-        original_content = original_response.choices[0].message.content
-
-        # Create the new reflection message
-        reflection_prompt = f"This was the user's input: '{user_input.text}' and this was the AI's initial response: '{original_content}'. Please improve it."
-        messages = [
-            {"role": "user", "content": user_input.text},
-            {"role": "system", "content": reflection_prompt}
-        ]
-
-        refined_response = await self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            top_p=top_p,
-            temperature=temperature,
-            user=user_input.context.user_id,
-            **tool_kwargs
+    async def reflect_and_improve_response(self, user_query: str, gpt_response: str) -> str:
+        """Reflektiere und verbessere die Antwort basierend auf der ursprünglichen Anfrage."""
+        reflection_prompt = f"Benutzeranfrage: {user_query}\nGPT-Antwort: {gpt_response}\n---\nÜberprüfe und verbessere die Antwort, basierend auf der Anfrage."
+        response = await self.client.chat.completions.create(
+            model="gpt-3.5-turbo-1106",  # Annahme, dass dies das gewünschte Modell ist
+            messages=[
+                {"role": "system", "content": reflection_prompt}
+            ],
+            max_tokens=150,
+            top_p=self.entry.options.get(CONF_TOP_P, DEFAULT_TOP_P),
+            temperature=self.entry.options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE)
         )
-        return refined_response
-    except Exception as e:
-        _LOGGER.error("Failed during reflection and improvement: %s", e)
-        raise
+        # Gehe davon aus, dass die Antwort verbessert wurde
+        return response.choices[0].message.content
 
-
-    
     async def execute_function_call(
         self,
         user_input: conversation.ConversationInput,
@@ -479,7 +471,7 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
                 "content": str(result),
             }
         )
-        return await self.query( "Just Say 'Hello there'", messages, exposed_entities, n_requests)
+        return await self.query(user_input, messages, exposed_entities, n_requests)
 
     async def execute_tool_calls(
         self,
