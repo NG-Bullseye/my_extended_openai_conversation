@@ -1,4 +1,4 @@
-"""The OpenAI Conversation integration. Test"""
+"""The OpenAI Conversation integration."""
 from __future__ import annotations
 
 import json
