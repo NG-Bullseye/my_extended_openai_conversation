@@ -7,6 +7,7 @@ import sqlite3
 import time
 from typing import Any
 from urllib import parse
+import datetime
 
 from bs4 import BeautifulSoup
 from openai import AsyncAzureOpenAI, AsyncOpenAI
@@ -58,6 +59,22 @@ _LOGGER = logging.getLogger(__name__)
 
 AZURE_DOMAIN_PATTERN = r"\.openai\.azure\.com"
 
+# Helper function to append to log
+def append_to_log(filename, message):
+    with open(filename, 'a') as log_file:
+        log_file.write(message + "\n")
+
+# Helper function for log file setup and initial entries
+def setup_log_and_initialize_entries(user_input, exposed_entities):
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    log_filename = f"logs/openai_interaction_{timestamp}.txt"
+    os.makedirs(os.path.dirname(log_filename), exist_ok=True)
+
+    append_to_log(log_filename, f"Timestamp: {timestamp}")
+    append_to_log(log_filename, f"User Input: {user_input.text}")
+    append_to_log(log_filename, f"Exposed Entities: {exposed_entities}")
+    
+    return log_filename
 
 def get_function_executor(value: str):
     function_executor = FUNCTION_EXECUTORS.get(value)

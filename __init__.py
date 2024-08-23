@@ -75,6 +75,7 @@ from .helpers import (
     get_function_executor,
     is_azure,
     validate_authentication,
+
 )
 from .services import async_setup_services
 
@@ -159,7 +160,8 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
     def supported_languages(self) -> list[str] | Literal["*"]:
         """Return a list of supported languages."""
         return MATCH_ALL
-
+############################################################################################################################################################################################
+############################################################################################################################################################################################
     async def async_process(
             self, user_input: conversation.ConversationInput
     ) -> conversation.ConversationResult:
@@ -197,16 +199,25 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
         messages.append(user_message)
 
         try:
-            query_response = await self.query(user_input, messages, exposed_entities, 0)
+
+            filtered_messages = await self.information_extraction_layer(user_input, messages)  # Expecting a list of messages back
+            prepared_data = await self.post_query_preparation(user_input, filtered_messages, exposed_entities)
+            reflected_data = await self.query_reflection(prepared_data)
+                
+            query_response = await self.query(
+                reflected_data['user_input'], 
+                reflected_data['messages'], 
+                reflected_data['exposed_entities'], 
+                0
+            )
+
+            #query_response = await self.query("USERS INPUT:\n "+user_text +"\n GPT RESPONSE: \n"+ response_text +" \n HERE IS YOUR TASK: I want you to improve the Response. If the requirements are not met, i want you to improve it so the user is satisfied. If the user is unspecific, i want you to be creative and execute things you could fit.", messages, exposed_entities, 0)
             user_text=user_input.text
             response_text=query_response.message.content
 
-            for i in range (self.RELFEKTION_ITERATION_NUMBER):
-                # Reflexion und Verbesserung der Antwort
-                improved_response = await self.reflect_and_improve_response(
-                    user_text, response_text
-                )
-                response_text=improved_response
+            # Reflexion und Verbesserung der Antwort
+            improved_response = await self.reflect_and_improve_response( user_text, response_text )
+               
 
             query_response.message.content = improved_response
 
@@ -249,6 +260,202 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
         return conversation.ConversationResult(
             response=intent_response, conversation_id=conversation_id
         )
+##############################################################################################
+    async def information_extraction_layer(self, user_input: conversation.ConversationInput, messages):
+        reflection_prompt = f"Benutzeranfrage: {user_input.text}---\nAufgabe: Bitte extrahiere..."
+        response = await self.client.chat.completions.create(
+            model="gpt-4o",
+            messages=[{"role": "system", "content": reflection_prompt}],
+            max_tokens=150,
+            top_p=self.entry.options.get(CONF_TOP_P, DEFAULT_TOP_P),
+            temperature=self.entry.options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE)
+        )
+        new_content = response.choices[0].message.content
+        messages.append({"role": "system", "content": new_content})
+        return messages  # Returning a list of messages
+##############################################################################################
+    async def post_query_preparation(self, user_input: conversation.ConversationInput, messages, exposed_entities):
+        model = self.entry.options.get(CONF_CHAT_MODEL, DEFAULT_CHAT_MODEL)
+        response: ChatCompletion = await self.client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=self.entry.options.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS),
+            top_p=self.entry.options.get(CONF_TOP_P, DEFAULT_TOP_P),
+            temperature=self.entry.options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE),
+            user=user_input.conversation_id
+        )
+        choice: Choice = response.choices[0]
+        message = choice.message.content if choice.message.content else "No suggestion generated"
+        return {"user_input": user_input, "messages": messages, "exposed_entities": exposed_entities, "suggestion": message}
+  
+##############################################################################################
+
+##############################################################################################
+    async def query_reflection(self, prepared_data):
+        """Reflect and possibly enrich the prepared query based on user's intent."""
+        # Initial access to data from previous steps
+        user_input = prepared_data['user_input']
+        suggestion = prepared_data['suggestion']
+        exposed_entities = prepared_data['exposed_entities']
+        
+        # First GPT call to assess adequacy of the response
+        adequacy_response = await self.is_response_adequate(suggestion, user_input)
+
+        if adequacy_response['adequate'] == 'yes':
+            reflected_data = prepared_data  # If adequate, proceed without changes
+        else:
+            # Second GPT call to improve response based on the feedback
+            improvement_prompt = f"User input: {user_input.text}\nInitial suggestion: {suggestion}\nFeedback: {adequacy_response['feedback']}\n---\nTask: Generate an improved suggestion that fulfills the user's intent and addresses the feedback provided."
+            improved_suggestion = await self.generate_improved_suggestion(improvement_prompt)
+
+            reflected_data = {
+                "user_input": user_input,
+                "messages": prepared_data['messages'],
+                "exposed_entities": exposed_entities,
+                "suggestion": improved_suggestion
+            }
+
+        return reflected_data
+##############################################################################################
+
+    from pydantic import BaseModel
+    from openai import OpenAI
+
+    class AdequacyResponse(BaseModel):
+        adequate: str
+        feedback: str
+
+    client = OpenAI()
+
+    async def is_response_adequate(self, suggestion, user_input):
+        """Use GPT to assess if the suggestion matches the user's intent."""
+        evaluation_prompt = f"User input: {user_input.text}\nSuggestion: {suggestion}\n---\nTask: Evaluate the adequacy of the suggestion. Respond with a structured output."
+
+        completion = await client.beta.chat.completions.parse(
+            model="gpt-4o-2024-08-06",
+            messages=[
+                {
+                    "role": "system",
+                    "content": evaluation_prompt,
+                },
+            ],
+            tools=[
+                openai.pydantic_function_tool(AdequacyResponse),
+            ],
+        )
+
+        # The structured output is parsed and returned as a dictionary
+        return completion.choices[0].message.tool_calls[0].function.parsed_arguments
+
+##############################################################################################
+
+    async def generate_improved_suggestion(self, prompt):
+        """Generate an improved response based on the provided prompt."""
+        response = await self.client.chat.completions.create(
+            model="gpt-4",
+            messages=[{"role": "system", "content": prompt}],
+            max_tokens=200,
+            top_p=self.entry.options.get(CONF_TOP_P, DEFAULT_TOP_P),
+            temperature=self.entry.options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE)
+        )
+        return response.choices[0].message.content
+##############################################################################################
+
+##############################################################################################
+    async def query(
+        self,
+        user_input: conversation.ConversationInput,
+        messages,
+        exposed_entities,
+        n_requests,
+    ) -> OpenAIQueryResponse:
+        """Process a sentence."""
+        model = self.entry.options.get(CONF_CHAT_MODEL, DEFAULT_CHAT_MODEL)
+        max_tokens = self.entry.options.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS)
+        top_p = self.entry.options.get(CONF_TOP_P, DEFAULT_TOP_P)
+        temperature = self.entry.options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE)
+        use_tools = self.entry.options.get(CONF_USE_TOOLS, DEFAULT_USE_TOOLS)
+        context_threshold = self.entry.options.get(
+            CONF_CONTEXT_THRESHOLD, DEFAULT_CONTEXT_THRESHOLD
+        )
+        functions = list(map(lambda s: s["spec"], self.get_functions()))
+        function_call = "auto"
+        if n_requests == self.entry.options.get(
+            CONF_MAX_FUNCTION_CALLS_PER_CONVERSATION,
+            DEFAULT_MAX_FUNCTION_CALLS_PER_CONVERSATION,
+        ):
+            function_call = "none"
+
+        tool_kwargs = {"functions": functions, "function_call": function_call}
+        if use_tools:
+            tool_kwargs = {
+                "tools": [{"type": "function", "function": func} for func in functions],
+                "tool_choice": function_call,
+            }
+
+        if len(functions) == 0:
+            tool_kwargs = {}
+
+        _LOGGER.info("Prompt for %s: %s", model, messages)
+
+        response: ChatCompletion = await self.client.chat.completions.create(
+            model=model,
+            messages=messages,
+            max_tokens=max_tokens,
+            top_p=top_p,
+            temperature=temperature,
+            user=user_input.conversation_id,
+            **tool_kwargs,
+        )
+
+        _LOGGER.info("Response %s", response.model_dump(exclude_none=True))
+
+        if response.usage.total_tokens > context_threshold:
+            await self.truncate_message_history(messages, exposed_entities, user_input)
+
+        choice: Choice = response.choices[0]
+        message = choice.message
+     
+        # Check if message.content is None and handle it appropriately
+        if message.content is None:
+            new_text = "default message"  # Use a default message or handle the situation as needed
+        else:
+            new_text = message.content   
+
+        message.content = new_text
+        if choice.finish_reason == "function_call":
+            return await self.execute_function_call(
+                user_input, messages, message, exposed_entities, n_requests + 1
+            )
+        if choice.finish_reason == "tool_calls":
+            return await self.execute_tool_calls(
+                user_input, messages, message, exposed_entities, n_requests + 1
+            )
+        if choice.finish_reason == "length":
+            raise TokenLengthExceededError(response.usage.completion_tokens)
+
+        return OpenAIQueryResponse(response=response, message=message)   
+##############################################################################################
+    async def reflect_and_improve_response(self, user_query: str, gpt_response: str) -> str:  
+        reflection_prompt_1 = f"Benutzeranfrage: {user_query}\nGPT-Antwort: {gpt_response}\n---\nHier ist deine Aufgabe: Schreibe eine Antwort, die ein intelligentes Wesen auf die request den nutzers geben würde. Beachte die ursprüngliche Frage und Antwort vorherirger GPT instanzen. Ich möchte dass die Conversation wie mit Jarvis abläuft. Deine Antwort wird direkt dem Nutzer vorgelesen. Wenn du eine execution function aufrufst gib keine antwort! denn beim ausführen von aktionen soll nicht geredet werden. Außerdem achte darauf, dass die Antworten kurz und informationsdicht sind.'. Just for reference, the previous instance that you get the input from was checking if the requirements are met and improve the response."
+
+        response = await self.client.chat.completions.create(
+            model="gpt-4o-mini",  # Annahme, dass dies das gewünschte Modell ist
+            messages=[
+                {"role": "system", "content": reflection_prompt_1}
+            ],
+            max_tokens=150,
+            top_p=self.entry.options.get(CONF_TOP_P, DEFAULT_TOP_P),
+            temperature=self.entry.options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE)
+        )
+        # Gehe davon aus, dass die Antwort verbessert wurde
+        return response.choices[0].message.content
+
+############################################################################################################################################################################################
+############################################################################################################################################################################################
+
+
+
 
     def _generate_system_message(
         self, exposed_entities, user_input: conversation.ConversationInput
@@ -338,95 +545,6 @@ class OpenAIAgent(conversation.AbstractConversationAgent):
                 messages[0] = self._generate_system_message(
                     exposed_entities, user_input
                 )
-
-    async def query(
-        self,
-        user_input: conversation.ConversationInput,
-        messages,
-        exposed_entities,
-        n_requests,
-    ) -> OpenAIQueryResponse:
-        """Process a sentence."""
-        model = self.entry.options.get(CONF_CHAT_MODEL, DEFAULT_CHAT_MODEL)
-        max_tokens = self.entry.options.get(CONF_MAX_TOKENS, DEFAULT_MAX_TOKENS)
-        top_p = self.entry.options.get(CONF_TOP_P, DEFAULT_TOP_P)
-        temperature = self.entry.options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE)
-        use_tools = self.entry.options.get(CONF_USE_TOOLS, DEFAULT_USE_TOOLS)
-        context_threshold = self.entry.options.get(
-            CONF_CONTEXT_THRESHOLD, DEFAULT_CONTEXT_THRESHOLD
-        )
-        functions = list(map(lambda s: s["spec"], self.get_functions()))
-        function_call = "auto"
-        if n_requests == self.entry.options.get(
-            CONF_MAX_FUNCTION_CALLS_PER_CONVERSATION,
-            DEFAULT_MAX_FUNCTION_CALLS_PER_CONVERSATION,
-        ):
-            function_call = "none"
-
-        tool_kwargs = {"functions": functions, "function_call": function_call}
-        if use_tools:
-            tool_kwargs = {
-                "tools": [{"type": "function", "function": func} for func in functions],
-                "tool_choice": function_call,
-            }
-
-        if len(functions) == 0:
-            tool_kwargs = {}
-
-        _LOGGER.info("Prompt for %s: %s", model, messages)
-
-        response: ChatCompletion = await self.client.chat.completions.create(
-            model=model,
-            messages=messages,
-            max_tokens=max_tokens,
-            top_p=top_p,
-            temperature=temperature,
-            user=user_input.conversation_id,
-            **tool_kwargs,
-        )
-
-        _LOGGER.info("Response %s", response.model_dump(exclude_none=True))
-
-        if response.usage.total_tokens > context_threshold:
-            await self.truncate_message_history(messages, exposed_entities, user_input)
-
-        choice: Choice = response.choices[0]
-        message = choice.message
-     
-        # Check if message.content is None and handle it appropriately
-        if message.content is None:
-            new_text = "Hey Master, " + "default message"  # Use a default message or handle the situation as needed
-        else:
-            new_text = "Hey Master, " + message.content
-
-        message.content = new_text
-        if choice.finish_reason == "function_call":
-            return await self.execute_function_call(
-                user_input, messages, message, exposed_entities, n_requests + 1
-            )
-        if choice.finish_reason == "tool_calls":
-            return await self.execute_tool_calls(
-                user_input, messages, message, exposed_entities, n_requests + 1
-            )
-        if choice.finish_reason == "length":
-            raise TokenLengthExceededError(response.usage.completion_tokens)
-
-        return OpenAIQueryResponse(response=response, message=message)
-
-    async def reflect_and_improve_response(self, user_query: str, gpt_response: str) -> str:
-        """Reflektiere und verbessere die Antwort basierend auf der ursprünglichen Anfrage."""
-        reflection_prompt = f"Benutzeranfrage: {user_query}\nGPT-Antwort: {gpt_response}\n---\nHier ist deine Aufgabe: Überprüfe ob die Antwort den Anforderungen der Benutzeranfrage entspricht. Lasse bei Anweisungen keine Rückfragen zu und überprüfe sorgfaltig die informationen von Homeassistant um die Frage zu beantworten. Du solltest immer in der Lage sein die Aufgabe aus zu führen oder die Frage zu beantworten. Deine Verbesserte Antwort wird mit der vorherigen Antwort ersetzt. Also check, if the response is valid for the given exposed entity values. Your response should only be a direkt response to the users input because after all you are a voiceassistant. Never give a response like 'yes the response meets the requirements'. "
-        response = await self.client.chat.completions.create(
-            model="gpt-4o",  # Annahme, dass dies das gewünschte Modell ist
-            messages=[
-                {"role": "system", "content": reflection_prompt}
-            ],
-            max_tokens=150,
-            top_p=self.entry.options.get(CONF_TOP_P, DEFAULT_TOP_P),
-            temperature=self.entry.options.get(CONF_TEMPERATURE, DEFAULT_TEMPERATURE)
-        )
-        # Gehe davon aus, dass die Antwort verbessert wurde
-        return response.choices[0].message.content
 
     async def execute_function_call(
         self,
